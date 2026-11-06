@@ -1,106 +1,67 @@
 # ghostty-resurrect
 
-Back up and restore your [Ghostty](https://ghostty.org) terminal layout **and the Claude Code / Codex CLI sessions running inside it.** Restart your Mac without losing a single agent conversation.
+Save Ghostty windows, tabs, working directories and exact Codex or Claude Code conversation IDs, then reopen them after a restart.
 
-Think `tmux-resurrect`, but for Ghostty's native windows/tabs/splits — and it knows how to bring your AI coding agents back to life.
-
-```
-ghostty-resurrect backup     # before you restart
-#  ... reboot ...
-ghostty-resurrect restore    # tabs, panes, and every Claude/Codex session resumed
-```
-
-## Why
-
-Ghostty has no session persistence — quit it and your carefully arranged tabs and panes are gone. If those panes were running long-lived `claude` or `codex` sessions, you lose all that context too. `ghostty-resurrect` snapshots the whole layout, figures out which resumable session each pane is running, and rebuilds everything on demand, auto-running `claude --resume <id>` / `codex resume <id>` in each pane.
-
-## What it captures
-
-- Every Ghostty **window → tab → pane**, with each pane's working directory and title
-- For each pane, whether it's a **Claude Code** session, a **Codex** session, or a plain shell
-- The **resumable session id** for each agent pane
-
-## How it works
-
-No daemon, no shell hooks, no wrappers around your agents. It reconstructs everything from what's already on disk at backup time:
-
-1. **Layout** comes from Ghostty's AppleScript dictionary (added in Ghostty 1.3.0): windows, tabs, terminals, working directories, titles.
-2. **Pane → session** is the hard part. Each running `claude`/`codex` process is matched to its on-disk session transcript by **start-time ≈ transcript birth-time**. For Claude, the pane's live title is then matched against the transcript's `aiTitle` field, which makes the mapping authoritative even when several sessions share one directory.
-3. **Restore** uses Ghostty's scripting verbs (`new window`, `new tab`, `split`) with a surface configuration that sets the pane's `initial working directory` and an `initial input` of the resume command — so each pane opens in the right place and resumes itself.
+This local version is based on [redareda9/ghostty-resurrect](https://github.com/redareda9/ghostty-resurrect), revision a568557c72ffcd47afb1f935fb4179c4b97f7493. It replaces the original directory/title/timestamp guesses with process and open-transcript evidence, and adds protected automatic backups. The upstream npm release does not contain these changes.
 
 ## Requirements
 
-- **macOS** (uses AppleScript + `lsof`/`ps`/`stat`)
-- **Ghostty ≥ 1.3.0** (the AppleScript scripting dictionary)
-- **Node ≥ 18** or **[Bun](https://bun.sh)** — the CLI is a single dependency-free script
-- [Claude Code](https://www.claude.com/product/claude-code) and/or [Codex CLI](https://developers.openai.com/codex/cli) if you want session resume (layout backup works without them)
+- macOS, Ghostty 1.4 or newer, Node.js 18 or newer.
+- Automation permission for the invoking terminal or background service to control Ghostty.
+- Codex or Claude Code available in the shell used by Ghostty.
 
-## Install
-
-```sh
-npm install -g ghostty-resurrect
-# or
-bun install -g ghostty-resurrect
-```
-
-Or just clone and symlink the script anywhere on your `PATH`:
-
-```sh
-git clone https://github.com/redareda9/ghostty-resurrect.git
-ln -s "$PWD/ghostty-resurrect/bin/ghostty-resurrect" ~/bin/ghostty-resurrect
-```
-
-The first time you run it, macOS will ask for permission to let your terminal control Ghostty (System Settings → Privacy & Security → Automation).
+There are no npm dependencies. Install this checkout by linking its executable into your PATH; keep the adjacent lib directory with it. The dotfiles integration supplies the executable link and a LaunchAgent.
 
 ## Usage
 
 ```sh
-ghostty-resurrect backup [name]              # snapshot current layout + sessions (default name: "latest")
-ghostty-resurrect restore [name]             # reopen Ghostty with the saved layout, resume each session
-ghostty-resurrect restore [name] --dry-run   # print the AppleScript it would run, without running it
-ghostty-resurrect list                       # list saved snapshots
-ghostty-resurrect show [name]                # print a snapshot
+ghostty-resurrect backup                 # explicit checkpoint before a planned shutdown
+ghostty-resurrect status                 # check the last backup and any recovery warning
+ghostty-resurrect restore --missing      # reopen saved conversations that are not running
 ```
 
-Example:
+Other commands are `show [name]`, `list`, `backup [name]`, `restore [name]` and `restore [name] --dry-run`. An ordinary restore refuses to duplicate a live conversation. The missing-only option also skips saved shell panes whose original terminal still exists.
 
-```
-$ ghostty-resurrect backup
-Window 1
-  Tab 1: migrate-logs-to-axiom
-     - [claude efa2d5f9] migrate-logs-to-axiom
-     - [claude 121511b5] Find best table at Ojo Mexican restaurant
-  Tab 2 *: api refactor
-     - [codex 019eddf6] api refactor
-     - [shell] ~/src/web
+An explicit `backup` accepts the current layout as the new checkpoint, including intentionally closed panes. Run it when you deliberately want to discard an older recovery layout. Named backups remain until you remove them.
 
-1 window(s), 4 pane(s), 3 agent session(s).
+## Exact conversation matching
 
-Saved -> ~/.config/ghostty-resurrect/latest.json
-```
+Ghostty supplies each pane's foreground PID and TTY. The process tree handles launcher wrappers and app-server children. An agent's open main transcript supplies the exact conversation ID; Codex sub-agent transcripts are excluded. Resumed and forked main conversations can be older than the running process. Several conversations can share a directory or title without being confused.
 
-Snapshots are plain JSON in `~/.config/ghostty-resurrect/` — easy to inspect, edit, or commit.
+Codex restores into the project directory recorded in its transcript, which can differ from a stale shell-reported directory. Custom session stores are retained. Claude requires an open main transcript; no timestamp or title fallback is used. A new empty agent, missing transcript, process race or ambiguous identity makes the capture fail and preserves the previous backup.
 
-## Claude Code skills (optional)
+A successful restore verifies that the saved conversation IDs are open again. If startup is incomplete, it reports that fact and keeps the previous checkpoint protected; fix any prompts in the new panes and retry `restore --missing`.
 
-If you use Claude Code, drop the bundled skills into `~/.claude/skills/` so you can just say **"backup"** or **"restore"** in any session:
+## Automatic backup policy
+
+Invoke `auto-backup` every 15 seconds from a LaunchAgent. It does not launch Ghostty when the app is closed.
+
+- New or unchanged layouts are saved immediately when captured.
+- Removing panes must remain stable for 60 seconds before replacing the checkpoint. This protects against windows closing one by one during shutdown.
+- Losing all agent conversations never replaces a checkpoint containing agents automatically.
+- A different Mac boot or Ghostty process cannot overwrite unrecovered conversations. Restore them or explicitly run `backup` to accept a fresh layout.
+- Partially completed restores stay protected until the required conversations are running.
+
+A newly opened session can be newer than the last scheduled capture. Run `backup` before a planned shutdown for an immediate checkpoint. Automatic backups do not guarantee preservation of changes made after the last successful capture.
+
+Snapshots and the small current status files live in `~/.config/ghostty-resurrect/`, outside version control. The directory is private (0700), files are private (0600), writes use fsync plus atomic replacement, and macOS lockf serialises writers. Runtime status is replaced rather than accumulated as an unbounded log. `GHOSTTY_RESURRECT_DIR` selects an isolated backup store for testing. Legacy snapshots with guessed conversation identities are rejected.
+
+## Recovery boundaries
+
+Restoration reopens conversations and directories. It does not preserve running commands, process memory, unsaved editor buffers or terminal scrollback. Local jobs stop when the Mac shuts down. Remote jobs need their own persistence, such as tmux on the remote host.
+
+Split panes are recreated as a left-to-right chain; nested geometry and window position/size are not preserved. Selected tabs are restored. Ghostty's own window-save-state can create additional empty windows alongside restored ones; the dotfiles setup disables that overlapping restoration.
+
+Codex recovery was checked against live sessions and a stopped disposable conversation. Claude matching is covered by isolated tests, but has not been verified against a live Claude session on this Mac.
+
+## Validation
 
 ```sh
-cp -r skills/backup skills/restore ~/.claude/skills/
+npm test
 ```
 
-## Limitations (v1)
+The dependency-free Node tests cover native binaries, launcher trees, multiple sessions in one directory, old resumed sessions, sub-agents, uncertain identities, interrupted writes, private file modes, shutdown transitions, new boots, incomplete restores and duplicate prevention. Fixtures use temporary directories and are permanently removed after each test.
 
-- **Split geometry is approximate.** Panes are recreated as an even left-to-right split chain. The *number* of panes per tab and every session resume correctly, but a complex nested split arrangement won't be pixel-identical. (Exact geometry via the macOS Accessibility API is on the roadmap.)
-- **Resuming duplicates a live session.** Restore is meant for the *quit → reboot → restore* flow. Running it while the original sessions are still open will start second processes against the same session files.
-- On-screen window position/size isn't restored.
-- macOS + Ghostty only.
+## Licence
 
-## Prior art
-
-- [`gtab`](https://github.com/Franvy/gtab) — Ghostty workspace/layout manager (saves tabs, splits, working dirs). It captures split geometry via Accessibility but does **not** restore running processes or agent sessions. `ghostty-resurrect` focuses on the session-resume half.
-- [`tmux-resurrect`](https://github.com/tmux-plugins/tmux-resurrect) — the inspiration, for tmux.
-
-## License
-
-MIT © Reda ([@redareda9](https://github.com/redareda9))
+MIT; see LICENSE. Original work by Reda (@redareda9).

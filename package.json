@@ -1,11 +1,12 @@
 {
   "name": "ghostty-resurrect",
-  "version": "0.1.0",
+  "version": "0.2.0-local.1",
   "description": "Back up & restore Ghostty tabs, panes, and the Claude Code / Codex CLI sessions running inside them — the tmux-resurrect of Ghostty + AI coding agents.",
   "bin": {
     "ghostty-resurrect": "bin/ghostty-resurrect"
   },
   "scripts": {
+    "test": "node --test --test-reporter=tap",
     "backup": "node bin/ghostty-resurrect backup",
     "restore": "node bin/ghostty-resurrect restore"
   },
@@ -39,6 +40,7 @@
   ],
   "files": [
     "bin/",
+    "lib/",
     "skills/",
     "README.md",
     "LICENSE"
